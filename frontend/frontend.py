@@ -1,149 +1,147 @@
 import streamlit as st
 import requests
 import base64
+from datetime import datetime
 from streamlit_option_menu import option_menu
+import plotly.express as px
 
-# ======================
-# Page Config
-# ======================
-st.set_page_config(page_title="Pramān", page_icon="🛡️", layout="wide")
+# ===================== Page Config =====================
+st.set_page_config(
+    page_title="Pramān Cert System",
+    page_icon="🪪",
+    layout="wide"
+)
 
-# ======================
-# Themes
-# ======================
-dark_theme = {
-    "bg_main": "#0f1116", "bg_sec": "#181a1f",
-    "text": "#e0e0e0", "primary": "#4ade80",
-    "secondary": "#9ca3af", "border": "#4ade80",
-    "card": "#1e2128", "card_border": "#6b7280"
-}
+# ===================== Themes =====================
+dark_theme = {"bg": "#0f1116","card": "#1e2128","text": "#e0e0e0","primary": "#4ade80","secondary": "#9ca3af","button_hover": "#22c55e"}
+light_theme = {"bg": "#f0f2f6","card": "#ffffff","text": "#333333","primary": "#16a34a","secondary": "#4b5563","button_hover": "#22c55e"}
 
-light_theme = {
-    "bg_main": "#f0f2f6", "bg_sec": "#ffffff",
-    "text": "#333333", "primary": "#16a34a",
-    "secondary": "#4b5563", "border": "#16a34a",
-    "card": "#f9fafb", "card_border": "#d1d5db"
-}
-
-# ======================
-# Session state
-# ======================
-if "token" not in st.session_state: st.session_state.token = None
-if "role" not in st.session_state: st.session_state.role = None
 if "theme" not in st.session_state: st.session_state.theme = "dark"
-
-# ======================
-# Theme switcher
-# ======================
-col1, col2 = st.columns([1,0.2])
-with col2:
-    is_dark = st.toggle("Dark Mode", value=(st.session_state.theme=="dark"))
-st.session_state.theme = "dark" if is_dark else "light"
 theme = dark_theme if st.session_state.theme=="dark" else light_theme
 
-# ======================
-# Logo & Branding
-# ======================
-logo_path = "assets/logos/Praman_dark.png" if st.session_state.theme=="dark" else "assets/logos/Praman_light.png"
-st.image(logo_path, width=220)
-st.markdown(f'<div style="text-align:center;color:{theme["primary"]};font-size:2.5rem;font-weight:bold;">🛡️ Pramān</div>', unsafe_allow_html=True)
-st.markdown(f'<div style="text-align:center;color:{theme["secondary"]};font-size:1.2rem;">Certificate Verification Platform</div>', unsafe_allow_html=True)
+if "history" not in st.session_state: st.session_state.history=[]
+if "token" not in st.session_state: st.session_state.token=None
+if "role" not in st.session_state: st.session_state.role=None
+if "user_type" not in st.session_state: st.session_state.user_type=None
 
-# ======================
-# Inline CSS
-# ======================
+# ===================== Custom CSS =====================
 st.markdown(f"""
 <style>
-body {{ background-color:{theme['bg_main']}; color:{theme['text']}; }}
-.stTextInput>div>div>input {{
-    border-radius:10px; border:1px solid {theme['border']}; padding:10px; background-color:{theme['bg_sec']}; color:{theme['text']};
-}}
-.stFileUploader div {{ background-color:{theme['card']}; border:1px dashed {theme['border']}; border-radius:12px; padding:15px; text-align:center; }}
+body {{background-color: {theme['bg']}; color: {theme['text']};}}
 .stButton>button {{
-    background:linear-gradient(to right,{theme['primary']},#22c55e); color:white; border-radius:10px; padding:10px 20px; font-size:1rem; font-weight:bold; border:none;
+    background: linear-gradient(to right, {theme['primary']}, {theme['button_hover']});
+    color: white; font-weight: bold; border-radius: 12px; padding: 10px 25px; transition: 0.3s;
 }}
-.stButton>button:hover {{ background:linear-gradient(to right,#22c55e,{theme['primary']}); transform:scale(1.05); }}
-.card {{ background-color:{theme['card']}; border:1px solid {theme['card_border']}; border-radius:12px; padding:20px; margin-top:15px; box-shadow:0px 4px 15px rgba(0,0,0,0.25); }}
+.stButton>button:hover {{transform: scale(1.05);}}
+.card {{background-color: {theme['card']}; border-radius: 15px; padding: 20px; margin-bottom: 20px; box-shadow: 0px 4px 15px rgba(0,0,0,0.3);}}
+.footer {{text-align:center; margin-top:50px; font-size:0.9rem; color:{theme['secondary']};}}
 </style>
 """, unsafe_allow_html=True)
 
-# ======================
-# API URL
-# ======================
-API_URL = "http://127.0.0.1:5000"
+# ===================== Header =====================
+col1, col2 = st.columns([3,1])
+with col1:
+    st.markdown(f"<h1 style='color:{theme['primary']};'>🪪 Pramān Certificate System</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:{theme['secondary']};'>Secure Blockchain-based Certificate Issuing & Verification</p>", unsafe_allow_html=True)
+with col2:
+    toggle = st.checkbox("Dark Mode", value=(st.session_state.theme=="dark"))
+    st.session_state.theme = "dark" if toggle else "light"
+    theme = dark_theme if st.session_state.theme=="dark" else light_theme
 
-# ======================
-# Navigation
-# ======================
-selected = option_menu(None, ["Login","Institute","Verify","Admin"],
-    icons=["box-arrow-in-right","building","check-circle","person-badge"],
-    orientation="horizontal",
-    styles={"container":{"padding":"0!important","background-color":theme['bg_sec'],"border-radius":"10px"},
-            "icon":{"color":theme['primary']},
-            "nav-link":{"color":theme['text']},
-            "nav-link-selected":{"background-color":theme['primary']}})
+# ===================== User Type Selection =====================
+if st.session_state.user_type is None:
+    st.subheader("Who are you?")
+    user_type = st.radio("Select user type", ["Admin", "Institute / Issuer", "Organisation / Verifier"])
+    if st.button("Continue"):
+        st.session_state.user_type = user_type
 
-# ======================
-# Views
-# ======================
-# Login
-if selected=="Login":
-    st.subheader("🔐 Login")
+# ===================== Login =====================
+if st.session_state.user_type and not st.session_state.token:
+    st.subheader(f"{st.session_state.user_type} Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
     if st.button("Login"):
-        res = requests.post(f"{API_URL}/login", json={"username":username,"password":password})
-        if res.status_code==200:
-            data=res.json()
+        r = requests.post("http://127.0.0.1:5000/login", json={"username": username, "password": password})
+        if r.status_code == 200:
+            data = r.json()
             st.session_state.token = data["access_token"]
             st.session_state.role = data["role"]
-            st.success(f"✅ Logged in as {data['role']}")
-        else: st.error("❌ Invalid credentials")
+            st.success(f"Logged in as {st.session_state.role}")
+        else:
+            st.error("Invalid credentials")
 
-# Institute Dashboard
-elif selected=="Institute" and st.session_state.role=="institute":
-    st.subheader("🏫 Institute Dashboard - Issue Certificate")
-    uploaded_file = st.file_uploader("Upload Certificate File", type=["pdf","png","jpg"])
-    if uploaded_file and st.button("📜 Issue Certificate"):
-        files={"file":uploaded_file}
-        headers={"Authorization":f"Bearer {st.session_state.token}"}
-        res=requests.post(f"{API_URL}/issue", files=files, headers=headers)
-        if res.status_code==200:
-            data=res.json()
-            st.markdown('<div class="card">',unsafe_allow_html=True)
-            st.success(f"Certificate issued with ID: {data['cert_id']}")
-            st.image(base64.b64decode(data["qr_code"]), width=200, caption="Scan to Verify")
-            st.markdown('</div>',unsafe_allow_html=True)
-        else: st.error("❌ Failed to issue certificate")
+# ===================== Role-based Views =====================
+if st.session_state.token:
+    # Logout Button
+    if st.button("Logout"):
+        st.session_state.token=None
+        st.session_state.role=None
+        st.session_state.user_type=None
+        st.experimental_rerun()
 
-# Verify
-elif selected=="Verify":
-    st.subheader("✅ Verify Certificate")
-    cert_id = st.text_input("Enter Certificate ID")
-    if st.button("🔍 Verify"):
-        res = requests.post(f"{API_URL}/verify", json={"cert_id":cert_id})
-        if res.status_code==200:
-            data=res.json()
-            st.markdown('<div class="card">',unsafe_allow_html=True)
-            if data["status"]=="valid": st.success(f"Certificate {data['cert_id']} is VALID ✅")
-            elif data["status"]=="tampered": st.error("⚠️ Certificate has been TAMPERED")
-            else: st.warning("❌ Certificate not found")
-            st.json(data)
-            st.markdown('</div>',unsafe_allow_html=True)
-        else: st.error("Verification failed")
+    selected = option_menu(
+        menu_title=None,
+        options=["Dashboard", "Issue Certificate", "Verify Certificate"],
+        icons=["clipboard-data","file-earmark-plus","search"],
+        orientation="horizontal",
+        styles={
+            "container": {"padding": "0!important", "background-color": theme['card']},
+            "nav-link": {"font-size": "16px", "color": theme['text']},
+            "nav-link-selected": {"background-color": theme['primary'], "color":"white"},
+        }
+    )
+    headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-# Admin
-elif selected=="Admin" and st.session_state.role=="admin":
-    st.subheader("👨‍💼 Admin Dashboard")
-    cert_id = st.text_input("Enter Certificate ID to Blacklist")
-    if st.button("🚫 Blacklist Certificate"):
-        headers={"Authorization":f"Bearer {st.session_state.token}"}
-        res=requests.post(f"{API_URL}/blacklist", json={"cert_id":cert_id}, headers=headers)
-        if res.status_code==200: st.success(f"Certificate {cert_id} blacklisted successfully")
-        else: st.error("Failed to blacklist certificate")
+    # ===================== Dashboard =====================
+    if selected == "Dashboard":
+        st.subheader(f"{st.session_state.role.capitalize()} Dashboard")
+        if st.session_state.role == "admin":
+            r = requests.get("http://127.0.0.1:5000/fraud_logs", headers=headers)
+            if r.status_code == 200:
+                logs = r.json()
+                if logs:
+                    st.markdown("<div class='card'><h3>Fraud Logs</h3></div>", unsafe_allow_html=True)
+                    fig = px.bar(x=[l['cert_id'] for l in logs], y=[l['tamper_score'] for l in logs],
+                                 color=[l['tamper_score'] for l in logs], color_continuous_scale="reds")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No fraud logs yet.")
+        else:
+            st.info("Institute/User dashboard coming soon...")
 
-# Footer Branding
-venture_logo = "assets/logos/LeafCoreLabs_dark.png" if st.session_state.theme=="dark" else "assets/logos/LeafCoreLabs_light.png"
-st.markdown(f'<div style="text-align:center;margin-top:40px;"><p style="color:{theme["secondary"]};font-size:1rem;">Powered by</p></div>', unsafe_allow_html=True)
-st.image(venture_logo, width=160)
-st.markdown(f'<footer style="text-align:center;margin-top:20px;font-size:0.9rem;color:{theme["secondary"]};">© 2025 Pramān by LeafCore Labs • All Rights Reserved</footer>', unsafe_allow_html=True)
+    # ===================== Issue Certificate =====================
+    elif selected == "Issue Certificate" and st.session_state.role=="institute":
+        st.subheader("Issue Certificate")
+        file = st.file_uploader("Upload Certificate PDF/Image")
+        if st.button("Issue Certificate"):
+            if file:
+                r = requests.post("http://127.0.0.1:5000/issue", files={"file": file}, headers=headers)
+                if r.status_code == 200:
+                    data = r.json()
+                    st.markdown("<div class='card'><h4>Certificate Issued Successfully!</h4></div>", unsafe_allow_html=True)
+                    st.write(f"Certificate ID: {data['cert_id']}")
+                    st.image(base64.b64decode(data["qr_code"]), width=180)
+                else:
+                    st.error("Error issuing certificate")
+            else:
+                st.warning("Upload a certificate file")
+
+    # ===================== Verify Certificate =====================
+    elif selected == "Verify Certificate":
+        st.subheader("Verify Certificate")
+        cert_id = st.text_input("Certificate ID")
+        file = st.file_uploader("Optional: Upload Certificate File")
+        if st.button("Verify Certificate"):
+            files = {"file": file} if file else None
+            r = requests.post("http://127.0.0.1:5000/verify", json={"cert_id": cert_id})
+            if r.status_code == 200:
+                data = r.json()
+                st.markdown("<div class='card'><h4>Verification Result</h4></div>", unsafe_allow_html=True)
+                st.write(f"Status: {data['status']}")
+                st.write(f"Issuer: {data['issuer']}")
+                st.write(f"TX Hash: {data['tx_hash']}")
+            else:
+                st.error("Certificate not found or error")
+
+# ===================== Footer =====================
+st.markdown(f"<div class='footer'>Made with ❤️ by Leaf Core Labs</div>", unsafe_allow_html=True)

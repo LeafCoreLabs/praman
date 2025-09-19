@@ -1,42 +1,60 @@
-from flask import Flask, request, jsonify
-import uuid, hashlib, base64, qrcode, io, datetime, jwt
+import os
+import uuid
+import base64
+import qrcode
+import io
+import hashlib
+import jwt
+import datetime
 from functools import wraps
+from flask import Flask, request, jsonify
+from web3 import Web3
+import easyocr
+import numpy as np
+import logging
 
-# ======================
-# Flask App
-# ======================
+# -------------------- Flask App --------------------
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "supersecretkey"
+app.config["SECRET_KEY"] = "supersecretkey"  # replace with env var in production
 
-# ======================
-# In-Memory Database
-# ======================
+# -------------------- Logging --------------------
+logging.basicConfig(level=logging.INFO)
+
+# -------------------- Blockchain --------------------
+WEB3_PROVIDER = "HTTP://127.0.0.1:7545"  # Ganache or Polygon testnet
+w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
+CHAIN_ADDRESS = w3.eth.accounts[0] if w3.is_connected() else None
+
+# -------------------- In-Memory Users --------------------
 users = {
     "admin": {"password": "admin123", "role": "admin"},
-    "institute1": {"password": "inst123", "role": "institute"},
+    "inst1": {"password": "inst123", "role": "institute"},
+    "user1": {"password": "user123", "role": "user"}
 }
-certificates = {}
-blacklist = []
 
-# ======================
-# Utils
-# ======================
-def generate_qr(cert_id):
-    qr = qrcode.QRCode(box_size=10, border=4)
-    qr.add_data(f"verify://{cert_id}")
+# -------------------- Certificates & Fraud Logs --------------------
+certificates = {}  # cert_id -> {hash, issuer, status, qr_code, tx_hash}
+fraud_logs = []    # tamper_score 0-1
+
+# -------------------- Utility --------------------
+def hash_file(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+def generate_qr(cert_id: str, tx_hash: str) -> str:
+    qr = qrcode.QRCode(version=1, box_size=10, border=4, error_correction=qrcode.constants.ERROR_CORRECT_H)
+    qr.add_data(f"https://verify.example.com/{cert_id}?tx={tx_hash}")
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-def hash_file(file_bytes):
-    return hashlib.sha256(file_bytes).hexdigest()
-
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = request.headers.get("Authorization", "").split(" ")[-1]
+        token = None
+        if "Authorization" in request.headers:
+            token = request.headers["Authorization"].split(" ")[1]
         if not token:
             return jsonify({"error": "Token missing"}), 401
         try:
@@ -49,26 +67,39 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
-# ======================
-# Routes
-# ======================
+# -------------------- Auth with User Type --------------------
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
-    username, password = data.get("username"), data.get("password")
+    username = data.get("username")
+    password = data.get("password")
+    user_type = data.get("user_type")  # NEW: front-end sends selected type
+
     user = users.get(username)
     if not user or user["password"] != password:
         return jsonify({"error": "Invalid credentials"}), 401
+
+    # Check if selected type matches user role
+    role_map = {
+        "Admin / Moderator": "admin",
+        "Institute / Organization": "institute",
+        "User / Student": "user"
+    }
+    expected_role = role_map.get(user_type)
+    if expected_role != user["role"]:
+        return jsonify({"error": f"This account is not allowed for {user_type} login"}), 403
+
     token = jwt.encode({
         "username": username,
         "role": user["role"],
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=12)
     }, app.config["SECRET_KEY"], algorithm="HS256")
     return jsonify({"access_token": token, "role": user["role"]})
 
+# -------------------- Certificate Issue --------------------
 @app.route("/issue", methods=["POST"])
 @token_required
-def issue(current_user):
+def issue_cert(current_user):
     if current_user["role"] != "institute":
         return jsonify({"error": "Unauthorized"}), 403
     if "file" not in request.files:
@@ -77,42 +108,83 @@ def issue(current_user):
     file_bytes = file.read()
     cert_id = str(uuid.uuid4())
     file_hash = hash_file(file_bytes)
-    qr_code = generate_qr(cert_id)
+
+    # Blockchain tx mock
+    tx_hash = w3.eth.send_transaction({
+        'from': CHAIN_ADDRESS,
+        'to': CHAIN_ADDRESS,
+        'value': w3.toWei(0, 'ether')
+    }).hex() if CHAIN_ADDRESS else "demo_tx_hash"
+
+    qr_b64 = generate_qr(cert_id, tx_hash)
+
     certificates[cert_id] = {
         "cert_id": cert_id,
-        "issuer": "Demo Institute",
+        "issuer": current_user["role"],
         "hash": file_hash,
         "status": "valid",
-        "qr_code": qr_code,
+        "qr_code": qr_b64,
+        "tx_hash": tx_hash,
         "issued_at": datetime.datetime.utcnow().isoformat()
     }
-    return jsonify({"cert_id": cert_id, "qr_code": qr_code, "status": "issued"})
 
+    return jsonify({
+        "cert_id": cert_id,
+        "qr_code": qr_b64,
+        "tx_hash": tx_hash,
+        "status": "issued"
+    })
+
+# -------------------- Verification --------------------
 @app.route("/verify", methods=["POST"])
-def verify():
-    cert_id = request.json.get("cert_id")
+def verify_cert():
+    data = request.json
+    cert_id = data.get("cert_id")
+    file = request.files.get("file")  # optional
     cert = certificates.get(cert_id)
     if not cert:
         return jsonify({"status": "not_found"}), 404
-    if cert_id in blacklist:
-        return jsonify({"status": "tampered", "cert_id": cert_id}), 200
-    return jsonify({"status": cert["status"], "cert_id": cert_id, "issuer": cert["issuer"], "issued_at": cert["issued_at"]})
 
-@app.route("/blacklist", methods=["POST"])
+    # recompute hash if file uploaded
+    if file:
+        file_hash = hash_file(file.read())
+        if file_hash != cert["hash"]:
+            cert["status"] = "tampered"
+            fraud_logs.append({"cert_id": cert_id, "tamper_score": 1.0})
+
+    return jsonify({
+        "status": cert["status"],
+        "cert_id": cert_id,
+        "issuer": cert["issuer"],
+        "tx_hash": cert["tx_hash"],
+        "issued_at": cert["issued_at"]
+    })
+
+# -------------------- OCR --------------------
+@app.route("/ocr", methods=["POST"])
 @token_required
-def blacklist_cert(current_user):
+def ocr_cert(current_user):
+    if "file" not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    file = request.files["file"]
+    reader = easyocr.Reader(['en'])
+    result = reader.readtext(np.frombuffer(file.read(), np.uint8))
+    ocr_text = " ".join([text for (_, text, _) in result])
+    return jsonify({"ocr_text": ocr_text})
+
+# -------------------- Fraud Logs --------------------
+@app.route("/fraud_logs", methods=["GET"])
+@token_required
+def get_fraud_logs(current_user):
     if current_user["role"] != "admin":
         return jsonify({"error": "Unauthorized"}), 403
-    cert_id = request.json.get("cert_id")
-    if cert_id not in certificates:
-        return jsonify({"error": "Certificate not found"}), 404
-    blacklist.append(cert_id)
-    certificates[cert_id]["status"] = "tampered"
-    return jsonify({"message": f"Certificate {cert_id} blacklisted"})
+    return jsonify(fraud_logs)
 
+# -------------------- Health --------------------
 @app.route("/ping", methods=["GET"])
 def ping():
-    return jsonify({"status": "pong", "message": "Backend running"}), 200
+    return jsonify({"status": "pong", "message": "Pramān backend running"}), 200
 
+# -------------------- Run --------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
