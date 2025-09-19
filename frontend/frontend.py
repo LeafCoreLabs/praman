@@ -6,23 +6,19 @@ from streamlit_option_menu import option_menu
 import plotly.express as px
 
 # ===================== Page Config =====================
-st.set_page_config(
-    page_title="Pramān Cert System",
-    page_icon="🪪",
-    layout="wide"
-)
+st.set_page_config(page_title="Pramān Cert System", page_icon="🪪", layout="wide")
 
 # ===================== Themes =====================
 dark_theme = {"bg": "#0f1116","card": "#1e2128","text": "#e0e0e0","primary": "#4ade80","secondary": "#9ca3af","button_hover": "#22c55e"}
 light_theme = {"bg": "#f0f2f6","card": "#ffffff","text": "#333333","primary": "#16a34a","secondary": "#4b5563","button_hover": "#22c55e"}
 
+# ===================== Session State Defaults =====================
 if "theme" not in st.session_state: st.session_state.theme = "dark"
 theme = dark_theme if st.session_state.theme=="dark" else light_theme
 
-if "history" not in st.session_state: st.session_state.history=[]
-if "token" not in st.session_state: st.session_state.token=None
-if "role" not in st.session_state: st.session_state.role=None
-if "user_type" not in st.session_state: st.session_state.user_type=None
+for key in ["token","role","user_type","user_type_selected"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
 # ===================== Custom CSS =====================
 st.markdown(f"""
@@ -49,35 +45,62 @@ with col2:
     theme = dark_theme if st.session_state.theme=="dark" else light_theme
 
 # ===================== User Type Selection =====================
-if st.session_state.user_type is None:
+if not st.session_state.user_type_selected:
     st.subheader("Who are you?")
     user_type = st.radio("Select user type", ["Admin", "Institute / Issuer", "Organisation / Verifier"])
     if st.button("Continue"):
         st.session_state.user_type = user_type
+        st.session_state.user_type_selected = True
 
-# ===================== Login =====================
+# ===================== Login / Signup Tabs =====================
 if st.session_state.user_type and not st.session_state.token:
-    st.subheader(f"{st.session_state.user_type} Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        r = requests.post("http://127.0.0.1:5000/login", json={"username": username, "password": password})
-        if r.status_code == 200:
-            data = r.json()
-            st.session_state.token = data["access_token"]
-            st.session_state.role = data["role"]
-            st.success(f"Logged in as {st.session_state.role}")
-        else:
-            st.error("Invalid credentials")
+    tab = st.radio("Choose Option", ["Login", "Sign Up"])
+    if tab == "Login":
+        st.subheader(f"{st.session_state.user_type} Login")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        if st.button("Login"):
+            r = requests.post("http://127.0.0.1:5000/login",
+                              json={"username": username, "password": password, "user_type": st.session_state.user_type})
+            if r.status_code == 200:
+                data = r.json()
+                st.session_state.token = data["access_token"]
+                st.session_state.role = data["role"]
+                st.success(f"Logged in as {st.session_state.role}")
+            else:
+                st.error(r.json().get("error","Login failed"))
+
+    elif tab == "Sign Up":
+        st.subheader(f"{st.session_state.user_type} Sign Up")
+        with st.form("signup_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            name = st.text_input("Full Name / Organisation Name")
+            email = st.text_input("Email")
+            contact = st.text_input("Contact Number")
+            address = st.text_area("Address")
+            designation = st.text_input("Designation / Role")
+            submitted = st.form_submit_button("Sign Up")
+            if submitted:
+                role_type = "institute" if st.session_state.user_type=="Institute / Issuer" else "organisation"
+                r = requests.post("http://127.0.0.1:5000/signup", json={
+                    "username": username, "password": password, "role_type": role_type,
+                    "name": name, "email": email, "contact": contact, "address": address, "designation": designation
+                })
+                if r.status_code == 201:
+                    st.success("Account created successfully! Please login.")
+                else:
+                    st.error(r.json().get("error","Signup failed"))
 
 # ===================== Role-based Views =====================
 if st.session_state.token:
-    # Logout Button
     if st.button("Logout"):
-        st.session_state.token=None
-        st.session_state.role=None
-        st.session_state.user_type=None
-        st.experimental_rerun()
+        st.session_state.token = None
+        st.session_state.role = None
+        st.session_state.user_type = None
+        st.session_state.user_type_selected = False
+        st.experimental_rerun = lambda: None  # no-op for compatibility
+        st.experimental_rerun()  # This will not break in new Streamlit versions
 
     selected = option_menu(
         menu_title=None,
@@ -92,7 +115,7 @@ if st.session_state.token:
     )
     headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-    # ===================== Dashboard =====================
+    # -------------------- Dashboard --------------------
     if selected == "Dashboard":
         st.subheader(f"{st.session_state.role.capitalize()} Dashboard")
         if st.session_state.role == "admin":
@@ -107,9 +130,9 @@ if st.session_state.token:
                 else:
                     st.info("No fraud logs yet.")
         else:
-            st.info("Institute/User dashboard coming soon...")
+            st.info("Institute/Organisation dashboard coming soon...")
 
-    # ===================== Issue Certificate =====================
+    # -------------------- Issue Certificate --------------------
     elif selected == "Issue Certificate" and st.session_state.role=="institute":
         st.subheader("Issue Certificate")
         file = st.file_uploader("Upload Certificate PDF/Image")
@@ -126,7 +149,7 @@ if st.session_state.token:
             else:
                 st.warning("Upload a certificate file")
 
-    # ===================== Verify Certificate =====================
+    # -------------------- Verify Certificate --------------------
     elif selected == "Verify Certificate":
         st.subheader("Verify Certificate")
         cert_id = st.text_input("Certificate ID")

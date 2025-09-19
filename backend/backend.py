@@ -11,30 +11,70 @@ from flask import Flask, request, jsonify
 from web3 import Web3
 import easyocr
 import numpy as np
+import sqlite3
+import json
 import logging
 
 # -------------------- Flask App --------------------
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "supersecretkey"  # replace with env var in production
+app.config["SECRET_KEY"] = "supersecretkey"
 
 # -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO)
 
 # -------------------- Blockchain --------------------
-WEB3_PROVIDER = "HTTP://127.0.0.1:7545"  # Ganache or Polygon testnet
+WEB3_PROVIDER = "HTTP://127.0.0.1:7545"
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
 CHAIN_ADDRESS = w3.eth.accounts[0] if w3.is_connected() else None
 
-# -------------------- In-Memory Users --------------------
-users = {
-    "admin": {"password": "admin123", "role": "admin"},
-    "inst1": {"password": "inst123", "role": "institute"},
-    "user1": {"password": "user123", "role": "user"}
-}
+# -------------------- SQLite DB --------------------
+DB_FILE = "praman.db"
 
-# -------------------- Certificates & Fraud Logs --------------------
-certificates = {}  # cert_id -> {hash, issuer, status, qr_code, tx_hash}
-fraud_logs = []    # tamper_score 0-1
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Users table for all roles
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT NOT NULL,
+        role TEXT NOT NULL,
+        details TEXT
+    )
+    """)
+
+    # Certificates table
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS certificates (
+        cert_id TEXT PRIMARY KEY,
+        issuer TEXT,
+        file_hash TEXT,
+        status TEXT,
+        qr_code TEXT,
+        tx_hash TEXT,
+        issued_at TEXT
+    )
+    """)
+
+    # Fraud logs
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS fraud_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cert_id TEXT,
+        tamper_score REAL,
+        logged_at TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # -------------------- Utility --------------------
 def hash_file(file_bytes: bytes) -> str:
@@ -54,12 +94,15 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = None
         if "Authorization" in request.headers:
-            token = request.headers["Authorization"].split(" ")[1]
+            try:
+                token = request.headers["Authorization"].split(" ")[1]
+            except IndexError:
+                return jsonify({"error": "Token malformed"}), 401
         if not token:
             return jsonify({"error": "Token missing"}), 401
         try:
             data = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-            current_user = users.get(data["username"])
+            current_user = get_user(data["username"])
             if not current_user:
                 return jsonify({"error": "User not found"}), 401
         except Exception as e:
@@ -67,23 +110,65 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
-# -------------------- Auth with User Type --------------------
+# -------------------- DB User Functions --------------------
+def get_user(username):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE username=?", (username,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def add_user(username, password, role, details=""):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO users (username, password, role, details) VALUES (?,?,?,?)",
+                   (username, password, role, json.dumps(details)))
+    conn.commit()
+    conn.close()
+
+# -------------------- Auth Endpoints --------------------
+@app.route("/signup", methods=["POST"])
+def signup():
+    try:
+        data = request.json
+        username = data.get("username")
+        password = data.get("password")
+        role_type = data.get("role_type")  # 'institute' or 'organisation'
+        details = {
+            "name": data.get("name"),
+            "email": data.get("email"),
+            "contact": data.get("contact"),
+            "address": data.get("address"),
+            "designation": data.get("designation")
+        }
+
+        if not username or not password or not role_type:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        if get_user(username):
+            return jsonify({"error": "Username already exists"}), 400
+
+        add_user(username, password, role_type, details)
+        return jsonify({"message": f"{role_type.capitalize()} account created successfully!"}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
     username = data.get("username")
     password = data.get("password")
-    user_type = data.get("user_type")  # NEW: front-end sends selected type
+    user_type = data.get("user_type")  # from frontend
 
-    user = users.get(username)
+    user = get_user(username)
     if not user or user["password"] != password:
         return jsonify({"error": "Invalid credentials"}), 401
 
-    # Check if selected type matches user role
     role_map = {
         "Admin / Moderator": "admin",
-        "Institute / Organization": "institute",
-        "User / Student": "user"
+        "Institute / Issuer": "institute",
+        "Organisation / Verifier": "organisation"
     }
     expected_role = role_map.get(user_type)
     if expected_role != user["role"]:
@@ -96,7 +181,7 @@ def login():
     }, app.config["SECRET_KEY"], algorithm="HS256")
     return jsonify({"access_token": token, "role": user["role"]})
 
-# -------------------- Certificate Issue --------------------
+# -------------------- Certificate Endpoints --------------------
 @app.route("/issue", methods=["POST"])
 @token_required
 def issue_cert(current_user):
@@ -109,7 +194,6 @@ def issue_cert(current_user):
     cert_id = str(uuid.uuid4())
     file_hash = hash_file(file_bytes)
 
-    # Blockchain tx mock
     tx_hash = w3.eth.send_transaction({
         'from': CHAIN_ADDRESS,
         'to': CHAIN_ADDRESS,
@@ -118,49 +202,55 @@ def issue_cert(current_user):
 
     qr_b64 = generate_qr(cert_id, tx_hash)
 
-    certificates[cert_id] = {
-        "cert_id": cert_id,
-        "issuer": current_user["role"],
-        "hash": file_hash,
-        "status": "valid",
-        "qr_code": qr_b64,
-        "tx_hash": tx_hash,
-        "issued_at": datetime.datetime.utcnow().isoformat()
-    }
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO certificates (cert_id, issuer, file_hash, status, qr_code, tx_hash, issued_at)
+        VALUES (?,?,?,?,?,?,?)""",
+                   (cert_id, current_user["role"], file_hash, "valid", qr_b64, tx_hash,
+                    datetime.datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
 
-    return jsonify({
-        "cert_id": cert_id,
-        "qr_code": qr_b64,
-        "tx_hash": tx_hash,
-        "status": "issued"
-    })
+    return jsonify({"cert_id": cert_id, "qr_code": qr_b64, "tx_hash": tx_hash, "status": "issued"})
 
-# -------------------- Verification --------------------
 @app.route("/verify", methods=["POST"])
 def verify_cert():
-    data = request.json
-    cert_id = data.get("cert_id")
-    file = request.files.get("file")  # optional
-    cert = certificates.get(cert_id)
-    if not cert:
-        return jsonify({"status": "not_found"}), 404
+    try:
+        data = request.json
+        cert_id = data.get("cert_id")
+        file = request.files.get("file")
 
-    # recompute hash if file uploaded
-    if file:
-        file_hash = hash_file(file.read())
-        if file_hash != cert["hash"]:
-            cert["status"] = "tampered"
-            fraud_logs.append({"cert_id": cert_id, "tamper_score": 1.0})
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM certificates WHERE cert_id=?", (cert_id,))
+        cert = cursor.fetchone()
+        if not cert:
+            conn.close()
+            return jsonify({"status": "not_found"}), 404
+        cert = dict(cert)
 
-    return jsonify({
-        "status": cert["status"],
-        "cert_id": cert_id,
-        "issuer": cert["issuer"],
-        "tx_hash": cert["tx_hash"],
-        "issued_at": cert["issued_at"]
-    })
+        if file:
+            file_hash = hash_file(file.read())
+            if file_hash != cert["file_hash"]:
+                cursor.execute("UPDATE certificates SET status=? WHERE cert_id=?", ("tampered", cert_id))
+                cursor.execute("INSERT INTO fraud_logs (cert_id, tamper_score, logged_at) VALUES (?,?,?)",
+                               (cert_id, 1.0, datetime.datetime.utcnow().isoformat()))
+                conn.commit()
+                cert["status"] = "tampered"
 
-# -------------------- OCR --------------------
+        conn.close()
+        return jsonify({
+            "status": cert["status"],
+            "cert_id": cert_id,
+            "issuer": cert["issuer"],
+            "tx_hash": cert["tx_hash"],
+            "issued_at": cert["issued_at"]
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# -------------------- OCR Endpoint --------------------
 @app.route("/ocr", methods=["POST"])
 @token_required
 def ocr_cert(current_user):
@@ -178,7 +268,12 @@ def ocr_cert(current_user):
 def get_fraud_logs(current_user):
     if current_user["role"] != "admin":
         return jsonify({"error": "Unauthorized"}), 403
-    return jsonify(fraud_logs)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM fraud_logs")
+    logs = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return jsonify(logs)
 
 # -------------------- Health --------------------
 @app.route("/ping", methods=["GET"])
