@@ -147,5 +147,5 @@ users: username, password, role, details
 certificates: cert_id, issuer, file_hash, status, qr_code, tx_hash, issued_at
 
 fraud_logs: cert_id, tamper_score, logged_at
-
-<p align="center">Made with ❤️ by <img src="assets/logos/Code_v.png" alt="Pramān Logo" width="300"/></p>
+<p><img src="assets/logos/Code_v.png" alt="Pramān Logo" width="300"/></p>
+<p align="center">Made with ❤️ by LeafCore Labs</p>
