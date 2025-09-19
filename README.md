@@ -1,5 +1,5 @@
 <p align="center">
-<img src="assets/logos/Praman.png" alt="Pramān Logo" width="300"/>
+<img src="assets/logos/Praman - Copy.png" alt="Pramān Logo" width="300"/>
 </p>
 
 <p align="center"><i>"📜 Securing Credentials on the Blockchain"</i></p>
