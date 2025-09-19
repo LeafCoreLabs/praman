@@ -8,14 +8,18 @@ import plotly.express as px
 # ===================== Page Config =====================
 st.set_page_config(page_title="Pramān Cert System", page_icon="🪪", layout="wide")
 
-# ===================== Themes =====================
-dark_theme = {"bg": "#0f1116","card": "#1e2128","text": "#e0e0e0","primary": "#4ade80","secondary": "#9ca3af","button_hover": "#22c55e"}
-light_theme = {"bg": "#f0f2f6","card": "#ffffff","text": "#333333","primary": "#16a34a","secondary": "#4b5563","button_hover": "#22c55e"}
+# ===================== Light Theme =====================
+theme = {
+    "bg": "#f5f7fa",
+    "card": "#ffffff",
+    "text": "#222222",
+    "primary": "#16a34a",
+    "secondary": "#4b5563",
+    "button_hover": "#22c55e",
+    "accent": "#e0f7ea"
+}
 
 # ===================== Session State Defaults =====================
-if "theme" not in st.session_state: st.session_state.theme = "dark"
-theme = dark_theme if st.session_state.theme=="dark" else light_theme
-
 for key in ["token","role","user_type","user_type_selected"]:
     if key not in st.session_state:
         st.session_state[key] = None
@@ -23,63 +27,110 @@ for key in ["token","role","user_type","user_type_selected"]:
 # ===================== Custom CSS =====================
 st.markdown(f"""
 <style>
-body {{background-color: {theme['bg']}; color: {theme['text']};}}
+body {{
+    background-color: {theme['bg']}; 
+    color: {theme['text']}; 
+    font-family: 'Arial', sans-serif;
+}}
 .stButton>button {{
     background: linear-gradient(to right, {theme['primary']}, {theme['button_hover']});
-    color: white; font-weight: bold; border-radius: 12px; padding: 10px 25px; transition: 0.3s;
+    color: white; 
+    font-weight: bold; 
+    border-radius: 12px; 
+    padding: 10px 25px; 
+    transition: 0.3s;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
 }}
-.stButton>button:hover {{transform: scale(1.05);}}
-.card {{background-color: {theme['card']}; border-radius: 15px; padding: 20px; margin-bottom: 20px; box-shadow: 0px 4px 15px rgba(0,0,0,0.3);}}
-.footer {{text-align:center; margin-top:50px; font-size:0.9rem; color:{theme['secondary']};}}
+.stButton>button:hover {{
+    transform: scale(1.05);
+}}
+.card {{
+    background-color: {theme['card']}; 
+    border-radius: 15px; 
+    padding: 25px; 
+    margin-bottom: 20px; 
+    box-shadow: 0px 6px 20px rgba(0,0,0,0.15);
+}}
+.footer {{
+    text-align:center; 
+    margin-top:50px; 
+    font-size:0.9rem; 
+    color:{theme['secondary']};
+}}
+h2 {{
+    color: {theme['primary']};
+}}
+input, textarea {{
+    border-radius: 8px !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
-# ===================== Header =====================
-col1, col2 = st.columns([3,1])
+# ===================== Header with Logo =====================
+col_logo, col1, col2 = st.columns([1, 4, 1])
+with col_logo:
+    st.image("assets/logos/Praman - Copy.png", width=180)
 with col1:
-    st.markdown(f"<h1 style='color:{theme['primary']};'>🪪 Pramān Certificate System</h1>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color:{theme['secondary']};'>Secure Blockchain-based Certificate Issuing & Verification</p>", unsafe_allow_html=True)
-with col2:
-    toggle = st.checkbox("Dark Mode", value=(st.session_state.theme=="dark"))
-    st.session_state.theme = "dark" if toggle else "light"
-    theme = dark_theme if st.session_state.theme=="dark" else light_theme
+    st.markdown(f"<h1 style='color:{theme['primary']};'>Pramān</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:{theme['secondary']}; font-size:16px;'>Certify. Verify. Simplify.</p>", unsafe_allow_html=True)
 
 # ===================== User Type Selection =====================
 if not st.session_state.user_type_selected:
-    st.subheader("Who are you?")
-    user_type = st.radio("Select user type", ["Admin", "Institute / Issuer", "Organisation / Verifier"])
-    if st.button("Continue"):
-        st.session_state.user_type = user_type
-        st.session_state.user_type_selected = True
+    st.subheader("Welcome! Who are you?")
+    st.markdown("Please select your user type to continue:")
+    user_type = st.radio("", ["Admin", "Institute / Issuer", "Organisation / Verifier"], horizontal=True)
+    col_back, col_continue, _ = st.columns([1,1,1])
+    with col_continue:
+        if st.button("Continue"):
+            st.session_state.user_type = user_type
+            st.session_state.user_type_selected = True
 
-# ===================== Login / Signup Tabs =====================
+# ===================== Back Button =====================
+if st.session_state.user_type_selected and not st.session_state.token:
+    if st.button("← Back"):
+        st.session_state.user_type = None
+        st.session_state.user_type_selected = False
+        st.rerun()
+
+# ===================== Login / Signup =====================
 if st.session_state.user_type and not st.session_state.token:
-    tab = st.radio("Choose Option", ["Login", "Sign Up"])
-    if tab == "Login":
-        st.subheader(f"{st.session_state.user_type} Login")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        if st.button("Login"):
-            r = requests.post("http://127.0.0.1:5000/login",
-                              json={"username": username, "password": password, "user_type": st.session_state.user_type})
-            if r.status_code == 200:
-                data = r.json()
-                st.session_state.token = data["access_token"]
-                st.session_state.role = data["role"]
-                st.success(f"Logged in as {st.session_state.role}")
-            else:
-                st.error(r.json().get("error","Login failed"))
+    tab = st.radio("Choose Option", ["Login", "Sign Up"], horizontal=True)
 
+    # ---------- LOGIN ----------
+    if tab == "Login":
+        st.markdown("### Login")
+        with st.form("login_form"):
+            username = st.text_input("Username", placeholder="Enter your username")
+            password = st.text_input("Password", type="password", placeholder="Enter your password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                r = requests.post("http://127.0.0.1:5000/login",
+                                  json={"username": username, "password": password, "user_type": st.session_state.user_type})
+                if r.status_code == 200:
+                    data = r.json()
+                    st.session_state.token = data["access_token"]
+                    st.session_state.role = data["role"]
+                    st.success(f"Logged in as {st.session_state.role}")
+                else:
+                    try:
+                        st.error(r.json().get("error","Login failed"))
+                    except:
+                        st.error("Login failed: Backend did not return valid JSON")
+
+    # ---------- SIGNUP ----------
     elif tab == "Sign Up":
-        st.subheader(f"{st.session_state.user_type} Sign Up")
+        st.markdown("### Sign Up")
         with st.form("signup_form"):
-            username = st.text_input("Username")
-            password = st.text_input("Password", type="password")
-            name = st.text_input("Full Name / Organisation Name")
-            email = st.text_input("Email")
-            contact = st.text_input("Contact Number")
-            address = st.text_area("Address")
-            designation = st.text_input("Designation / Role")
+            col1, col2 = st.columns(2)
+            with col1:
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                name = st.text_input("Full Name / Organisation Name")
+                email = st.text_input("Email")
+            with col2:
+                contact = st.text_input("Contact Number")
+                address = st.text_area("Address")
+                designation = st.text_input("Designation / Role")
             submitted = st.form_submit_button("Sign Up")
             if submitted:
                 role_type = "institute" if st.session_state.user_type=="Institute / Issuer" else "organisation"
@@ -87,10 +138,13 @@ if st.session_state.user_type and not st.session_state.token:
                     "username": username, "password": password, "role_type": role_type,
                     "name": name, "email": email, "contact": contact, "address": address, "designation": designation
                 })
-                if r.status_code == 201:
+                if r.status_code in [200,201]:
                     st.success("Account created successfully! Please login.")
                 else:
-                    st.error(r.json().get("error","Signup failed"))
+                    try:
+                        st.error(r.json().get("error","Signup failed"))
+                    except:
+                        st.error("Signup failed: Backend did not return valid JSON")
 
 # ===================== Role-based Views =====================
 if st.session_state.token:
@@ -99,9 +153,9 @@ if st.session_state.token:
         st.session_state.role = None
         st.session_state.user_type = None
         st.session_state.user_type_selected = False
-        st.experimental_rerun = lambda: None  # no-op for compatibility
-        st.experimental_rerun()  # This will not break in new Streamlit versions
+        st.rerun()
 
+    # ---------- NAVIGATION ----------
     selected = option_menu(
         menu_title=None,
         options=["Dashboard", "Issue Certificate", "Verify Certificate"],
@@ -115,27 +169,33 @@ if st.session_state.token:
     )
     headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
-    # -------------------- Dashboard --------------------
+    # ---------- DASHBOARD ----------
     if selected == "Dashboard":
-        st.subheader(f"{st.session_state.role.capitalize()} Dashboard")
+        st.markdown("## Dashboard")
         if st.session_state.role == "admin":
             r = requests.get("http://127.0.0.1:5000/fraud_logs", headers=headers)
             if r.status_code == 200:
                 logs = r.json()
                 if logs:
                     st.markdown("<div class='card'><h3>Fraud Logs</h3></div>", unsafe_allow_html=True)
-                    fig = px.bar(x=[l['cert_id'] for l in logs], y=[l['tamper_score'] for l in logs],
-                                 color=[l['tamper_score'] for l in logs], color_continuous_scale="reds")
+                    fig = px.bar(
+                        x=[l['cert_id'] for l in logs],
+                        y=[l['tamper_score'] for l in logs],
+                        color=[l['tamper_score'] for l in logs],
+                        color_continuous_scale="reds"
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.info("No fraud logs yet.")
         else:
             st.info("Institute/Organisation dashboard coming soon...")
 
-    # -------------------- Issue Certificate --------------------
+    # ---------- ISSUE CERTIFICATE ----------
     elif selected == "Issue Certificate" and st.session_state.role=="institute":
-        st.subheader("Issue Certificate")
+        st.markdown("## Issue Certificate")
         file = st.file_uploader("Upload Certificate PDF/Image")
+        if file:
+            st.info(f"File uploaded: {file.name}")
         if st.button("Issue Certificate"):
             if file:
                 r = requests.post("http://127.0.0.1:5000/issue", files={"file": file}, headers=headers)
@@ -143,15 +203,15 @@ if st.session_state.token:
                     data = r.json()
                     st.markdown("<div class='card'><h4>Certificate Issued Successfully!</h4></div>", unsafe_allow_html=True)
                     st.write(f"Certificate ID: {data['cert_id']}")
-                    st.image(base64.b64decode(data["qr_code"]), width=180)
+                    st.image(base64.b64decode(data["qr_code"]), width=200)
                 else:
                     st.error("Error issuing certificate")
             else:
-                st.warning("Upload a certificate file")
+                st.warning("Please upload a certificate file")
 
-    # -------------------- Verify Certificate --------------------
+    # ---------- VERIFY CERTIFICATE ----------
     elif selected == "Verify Certificate":
-        st.subheader("Verify Certificate")
+        st.markdown("## Verify Certificate")
         cert_id = st.text_input("Certificate ID")
         file = st.file_uploader("Optional: Upload Certificate File")
         if st.button("Verify Certificate"):
