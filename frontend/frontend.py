@@ -1,12 +1,11 @@
 import streamlit as st
 import requests
-import base64
 from streamlit_option_menu import option_menu
 import os
+import datetime
 
 # ================= CONFIG =================
 st.set_page_config(page_title="Pramān", page_icon="🪪", layout="centered")
-
 BACKEND_URL = "http://127.0.0.1:5000"
 
 # ================= STATE =================
@@ -19,7 +18,7 @@ if st.session_state.step is None:
 # ================= CSS =================
 st.markdown("""
 <style>
-body { background-color: #fafafa; font-family: 'Segoe UI', sans-serif; }
+body { background-color: #fafafa; font-family: 'Segoe UI', sans-serif'; }
 .stTextInput>div>div>input { border-radius: 3px; border: 1px solid #dbdbdb; background: #fafafa; }
 .stButton>button { background: #0095f6; color: white !important; font-weight: 600; border-radius: 6px; padding: 8px; width: 100%; transition: all 0.3s ease-in-out; }
 .stButton>button:hover { background: #0077cc; }
@@ -42,7 +41,6 @@ if st.session_state.step == "user_type":
 elif st.session_state.step in ["login", "signup"]:
     tab = st.radio("", ["Login", "Sign Up"], horizontal=True)
 
-    # LOGIN
     if tab == "Login":
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -66,10 +64,8 @@ elif st.session_state.step in ["login", "signup"]:
                         st.rerun()
                     else:
                         st.error(r.json().get("error", "Login failed"))
-                except:
-                    st.error("Backend not reachable")
-
-    # SIGNUP
+                except Exception as e:
+                    st.error(f"Backend not reachable: {str(e)}")
     elif tab == "Sign Up":
         with st.form("signup_form"):
             username = st.text_input("Username")
@@ -99,8 +95,8 @@ elif st.session_state.step in ["login", "signup"]:
                         st.rerun()
                     else:
                         st.error(r.json().get("error", "Signup failed"))
-                except:
-                    st.error("Backend not reachable")
+                except Exception as e:
+                    st.error(f"Backend not reachable: {str(e)}")
 
 # ---------- Step 3: Dashboard ----------
 elif st.session_state.step == "dashboard" and st.session_state.token:
@@ -127,12 +123,11 @@ elif st.session_state.step == "dashboard" and st.session_state.token:
             try:
                 r = requests.get(f"{BACKEND_URL}/fraud_logs", headers=headers)
                 if r.status_code == 200 and r.json():
-                    logs = r.json()
-                    st.table(logs)
+                    st.table(r.json())
                 else:
                     st.info("No fraud logs yet.")
-            except:
-                st.error("Backend not reachable")
+            except Exception as e:
+                st.error(f"Backend not reachable: {str(e)}")
         else:
             st.info("Institute/Organisation dashboard coming soon...")
 
@@ -142,69 +137,79 @@ elif st.session_state.step == "dashboard" and st.session_state.token:
         with st.form("issue_form"):
             student_name = st.text_input("Student Name")
             roll_no = st.text_input("Roll Number / ID")
+            dob = st.date_input("Date of Birth", min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
             course = st.text_input("Course / Degree")
             college = st.text_input("College / Institute")
-            date_of_issue = st.date_input("Date of Issue")
-            file = st.file_uploader("Supporting Document (PDF/Image)")
+            date_of_issue = st.date_input("Date of Issue", min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
+            file = st.file_uploader("Upload Certificate File (PDF/Image)")
             submitted = st.form_submit_button("Issue Certificate")
             if submitted:
-                if not student_name or not roll_no or not course or not college or not file:
-                    st.error("All fields and file are required")
+                if not all([student_name, roll_no, dob, course, college, file]):
+                    st.error("All fields and certificate file are mandatory")
                 else:
-                    files = {"file": file}
                     data = {
-                        "student_name": student_name,
-                        "roll_no": roll_no,
-                        "course": course,
-                        "college": college,
+                        "student_name": student_name.strip(),
+                        "roll_no": roll_no.strip(),
+                        "dob": str(dob),
+                        "course": course.strip(),
+                        "college": college.strip(),
                         "date_of_issue": str(date_of_issue)
                     }
+                    files = {"file": file}
                     try:
-                        r = requests.post(f"{BACKEND_URL}/issue", files=files, data=data, headers=headers)
+                        r = requests.post(f"{BACKEND_URL}/issue", data=data, files=files, headers=headers)
                         if r.status_code == 200:
                             cert = r.json()
                             st.success("Certificate Issued!")
-                            st.write(f"Certificate ID: {cert['cert_id']}")
-                            st.write(f"Student: {cert['student_name']}")
-                            st.write(f"Roll No: {cert['roll_no']}")
-                            st.write(f"Course: {cert['course']}")
-                            st.write(f"College: {cert['college']}")
-                            st.image(base64.b64decode(cert["qr_code"]), width=200)
+                            st.json(cert)
+                            with st.expander("Debug Info (OCR Text)"):
+                                st.text_area("", cert.get("debug", {}).get("ocr_text", ""), height=250)
                         else:
                             st.error(r.json().get("error", "Error issuing certificate"))
-                    except:
-                        st.error("Backend not reachable")
+                    except Exception as e:
+                        st.error(f"Backend not reachable: {str(e)}")
 
     # ---------- Verify Certificate ----------
     elif selected == "Verify Certificate":
         st.subheader("Verify Certificate")
         with st.form("verify_form"):
-            cert_id = st.text_input("Certificate ID")
-            student_name = st.text_input("Student Name (optional)")
-            roll_no = st.text_input("Roll Number (optional)")
-            course = st.text_input("Course (optional)")
-            college = st.text_input("College (optional)")
-            file = st.file_uploader("Upload Certificate File (optional)")
+            st.info("Student Name is mandatory. Provide either Roll Number OR Date of Issue. Certificate upload is required.")
+            student_name = st.text_input("Student Name")
+            roll_no = st.text_input("Roll Number")
+            date_of_issue = st.date_input("Date of Issue", min_value=datetime.date(1900, 1, 1), max_value=datetime.date.today())
+            file = st.file_uploader("Upload Certificate File (PDF/Image)")
             submitted = st.form_submit_button("Verify Certificate")
             if submitted:
-                data = {
-                    "cert_id": cert_id,
-                    "student_name": student_name,
-                    "roll_no": roll_no,
-                    "course": course,
-                    "college": college
-                }
-                files = {"file": file} if file else None
-                try:
-                    r = requests.post(f"{BACKEND_URL}/verify", data=data, files=files)
-                    if r.status_code == 200:
-                        cert = r.json()
-                        st.success("Verification Result")
-                        st.write(cert)
-                    else:
-                        st.error("Certificate not found or invalid")
-                except:
-                    st.error("Backend not reachable")
+                if not student_name:
+                    st.error("Student Name is mandatory")
+                elif not (roll_no or date_of_issue):
+                    st.error("Either Roll Number or Date of Issue must be provided")
+                elif not file:
+                    st.error("Certificate file is mandatory for verification")
+                else:
+                    data = {
+                        "student_name": student_name.strip(),
+                        "roll_no": roll_no.strip(),
+                        "date_of_issue": str(date_of_issue)
+                    }
+                    files = {"file": file}
+                    try:
+                        r = requests.post(f"{BACKEND_URL}/verify", data=data, files=files)
+                        if r.status_code in [200, 404]:
+                            cert = r.json()
+                            if cert.get("status") == "valid":
+                                st.success("Certificate Verified Successfully!")
+                                st.json(cert)
+                            else:
+                                st.error("Certificate not valid or tampered.")
+                                st.json(cert)
+                            if "debug" in cert:
+                                with st.expander("Debug Info (OCR Text)"):
+                                    st.text_area("", cert["debug"].get("ocr_text",""), height=250)
+                        else:
+                            st.error(r.json().get("error","Verification failed"))
+                    except Exception as e:
+                        st.error(f"Backend not reachable: {str(e)}")
 
 # ================= FOOTER =================
 st.markdown("<div class='footer'>Made with ❤️ by LeafCore Labs</div>", unsafe_allow_html=True)

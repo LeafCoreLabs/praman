@@ -16,7 +16,7 @@
 			{
 				"indexed": false,
 				"internalType": "string",
-				"name": "fileHash",
+				"name": "metadataHash",
 				"type": "string"
 			},
 			{
@@ -145,7 +145,7 @@
 			},
 			{
 				"internalType": "string",
-				"name": "fileHash",
+				"name": "metadataHash",
 				"type": "string"
 			},
 			{
@@ -212,7 +212,7 @@
 		"outputs": [
 			{
 				"internalType": "string",
-				"name": "fileHash",
+				"name": "metadataHash",
 				"type": "string"
 			},
 			{
@@ -244,6 +244,30 @@
 				"internalType": "uint256",
 				"name": "issuedAt",
 				"type": "uint256"
+			}
+		],
+		"stateMutability": "view",
+		"type": "function"
+	},
+	{
+		"inputs": [
+			{
+				"internalType": "string",
+				"name": "metadataHash",
+				"type": "string"
+			}
+		],
+		"name": "verifyMetadataHash",
+		"outputs": [
+			{
+				"internalType": "bool",
+				"name": "exists",
+				"type": "bool"
+			},
+			{
+				"internalType": "string",
+				"name": "certId",
+				"type": "string"
 			}
 		],
 		"stateMutability": "view",

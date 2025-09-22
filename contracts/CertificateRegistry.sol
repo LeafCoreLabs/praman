@@ -4,7 +4,8 @@ pragma solidity ^0.8.0;
 contract CertificateRegistry {
 
     struct Certificate {
-        string fileHash;
+        string certId;
+        string metadataHash;
         string studentName;
         string rollNo;
         string course;
@@ -13,19 +14,16 @@ contract CertificateRegistry {
         uint256 issuedAt;
     }
 
-    // Certificate storage
     mapping(string => Certificate) private certificates;
     mapping(string => bool) private certificateExists;
-
-    // Authorized issuers (institutes)
     mapping(address => bool) public authorizedIssuers;
+    mapping(string => string) private metadataToCertId;
 
     address public owner;
 
-    // Events
     event CertificateIssued(
         string certId,
-        string fileHash,
+        string metadataHash,
         string studentName,
         string rollNo,
         string course,
@@ -37,7 +35,6 @@ contract CertificateRegistry {
     event IssuerAdded(address indexed issuer);
     event IssuerRemoved(address indexed issuer);
 
-    // -------------------- Modifiers --------------------
     modifier onlyOwner() {
         require(msg.sender == owner, "Only owner can perform this action");
         _;
@@ -48,13 +45,11 @@ contract CertificateRegistry {
         _;
     }
 
-    // -------------------- Constructor --------------------
     constructor() {
         owner = msg.sender;
-        authorizedIssuers[owner] = true; // Owner can issue certificates
+        authorizedIssuers[owner] = true;
     }
 
-    // -------------------- Owner Functions --------------------
     function addAuthorizedIssuer(address _issuer) public onlyOwner {
         authorizedIssuers[_issuer] = true;
         emit IssuerAdded(_issuer);
@@ -65,10 +60,9 @@ contract CertificateRegistry {
         emit IssuerRemoved(_issuer);
     }
 
-    // -------------------- Certificate Functions --------------------
     function issueCertificate(
         string memory certId,
-        string memory fileHash,
+        string memory metadataHash,
         string memory studentName,
         string memory rollNo,
         string memory course,
@@ -76,10 +70,11 @@ contract CertificateRegistry {
     ) public onlyAuthorized {
         require(!certificateExists[certId], "Certificate already exists");
         require(bytes(certId).length > 0, "Certificate ID cannot be empty");
-        require(bytes(fileHash).length > 0, "File hash cannot be empty");
+        require(bytes(metadataHash).length > 0, "Metadata hash cannot be empty");
 
         certificates[certId] = Certificate(
-            fileHash,
+            certId,
+            metadataHash,
             studentName,
             rollNo,
             course,
@@ -88,12 +83,13 @@ contract CertificateRegistry {
             block.timestamp
         );
         certificateExists[certId] = true;
+        metadataToCertId[metadataHash] = certId;
 
-        emit CertificateIssued(certId, fileHash, studentName, rollNo, course, college, msg.sender, block.timestamp);
+        emit CertificateIssued(certId, metadataHash, studentName, rollNo, course, college, msg.sender, block.timestamp);
     }
 
     function verifyCertificate(string memory certId) public view returns (
-        string memory fileHash,
+        string memory metadataHash,
         string memory studentName,
         string memory rollNo,
         string memory course,
@@ -104,7 +100,7 @@ contract CertificateRegistry {
         require(certificateExists[certId], "Certificate not found");
         Certificate memory cert = certificates[certId];
         return (
-            cert.fileHash,
+            cert.metadataHash,
             cert.studentName,
             cert.rollNo,
             cert.course,
@@ -112,6 +108,11 @@ contract CertificateRegistry {
             cert.issuer,
             cert.issuedAt
         );
+    }
+
+    function verifyMetadataHash(string memory metadataHash) public view returns (bool exists, string memory certId) {
+        certId = metadataToCertId[metadataHash];
+        exists = bytes(certId).length > 0;
     }
 
     function isAuthorized(address _issuer) public view returns (bool) {

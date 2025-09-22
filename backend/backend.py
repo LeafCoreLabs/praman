@@ -1,8 +1,5 @@
 import os
 import uuid
-import base64
-import qrcode
-import io
 import hashlib
 import jwt
 import datetime
@@ -12,21 +9,20 @@ from web3 import Web3
 import sqlite3
 import json
 import logging
+from PIL import Image
+import pytesseract
+from pdf2image import convert_from_bytes
 
-# -------------------- Flask App --------------------
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "supersecretkey"
-
-# -------------------- Logging --------------------
 logging.basicConfig(level=logging.INFO)
 
-# -------------------- Blockchain --------------------
-WEB3_PROVIDER = "HTTP://127.0.0.1:8545"  # Anvil default RPC
+# -------------------- Blockchain Setup --------------------
+WEB3_PROVIDER = "HTTP://127.0.0.1:8545"
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
 CHAIN_ADDRESS = w3.eth.accounts[0] if w3.is_connected() else None
 
-# Load smart contract
-CONTRACT_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"  # Update on redeploy
+CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 with open("CertificateRegistryABI.json") as f:
     CONTRACT_ABI = json.load(f)
 contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
@@ -42,7 +38,6 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    # Users
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
@@ -51,25 +46,23 @@ def init_db():
         details TEXT
     )
     """)
-    # Certificates
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS certificates (
         cert_id TEXT PRIMARY KEY,
         issuer TEXT,
         student_name TEXT,
         roll_no TEXT,
+        dob TEXT,
         course TEXT,
         college TEXT,
         date_of_issue TEXT,
-        file_hash TEXT,
+        metadata_hash TEXT,
         status TEXT,
-        qr_code TEXT,
         tx_hash TEXT,
         issued_at TEXT,
         file_path TEXT
     )
     """)
-    # Fraud logs
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS fraud_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,24 +76,17 @@ def init_db():
 
 init_db()
 
+# -------------------- OCR Setup --------------------
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+POPPLER_PATH = r"C:\poppler-25.07.0\Library\bin"
+
 # -------------------- Utilities --------------------
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-def hash_file(file_bytes: bytes) -> str:
-    return hashlib.sha256(file_bytes).hexdigest()
-
-def generate_qr(cert_id: str, tx_hash: str) -> str:
-    qr = qrcode.QRCode(
-        version=1, box_size=10, border=4,
-        error_correction=qrcode.constants.ERROR_CORRECT_H
-    )
-    qr.add_data(f"http://127.0.0.1:8501/verify?cert_id={cert_id}")
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+def compute_metadata_hash(metadata: dict) -> str:
+    data_string = "|".join([str(metadata.get(k, "")) for k in ["student_name","roll_no","dob","course","college","date_of_issue"]])
+    return hashlib.sha256(data_string.encode()).hexdigest()
 
 def token_required(f):
     @wraps(f)
@@ -123,7 +109,6 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
-# -------------------- User Functions --------------------
 def get_user(username):
     conn = get_db()
     cursor = conn.cursor()
@@ -142,7 +127,6 @@ def add_user(username, password, role, details=""):
     conn.commit()
     conn.close()
 
-# -------------------- Default Admin --------------------
 def create_default_admin():
     admin_username = "leafcorelabs"
     admin_password = "leaf5289@"
@@ -154,31 +138,61 @@ def create_default_admin():
 
 create_default_admin()
 
-# -------------------- Auth Endpoints --------------------
+# -------------------- OCR --------------------
+def extract_text_from_file(file):
+    ext = os.path.splitext(file.filename)[1].lower()
+    images = []
+    ocr_text = ""
+    file.seek(0)
+    if ext == ".pdf":
+        images = convert_from_bytes(file.read(), poppler_path=POPPLER_PATH)
+    else:
+        images = [Image.open(file.stream)]
+    for img in images:
+        ocr_text += pytesseract.image_to_string(img) + "\n"
+    return ocr_text
+
+def extract_fields_from_ocr(ocr_text):
+    fields = {"student_name":"","roll_no":"","dob":"","course":"","college":"","date_of_issue":""}
+    for line in ocr_text.splitlines():
+        line_lower = line.lower()
+        if "name" in line_lower and not fields["student_name"]:
+            fields["student_name"] = line.split(":")[-1].strip()
+        elif "roll" in line_lower and not fields["roll_no"]:
+            fields["roll_no"] = line.split(":")[-1].strip()
+        elif "dob" in line_lower and not fields["dob"]:
+            fields["dob"] = line.split(":")[-1].strip()
+        elif "course" in line_lower and not fields["course"]:
+            fields["course"] = line.split(":")[-1].strip()
+        elif "college" in line_lower and not fields["college"]:
+            fields["college"] = line.split(":")[-1].strip()
+        elif "issue" in line_lower and not fields["date_of_issue"]:
+            fields["date_of_issue"] = line.split(":")[-1].strip()
+    return fields
+
+# -------------------- Routes --------------------
+
+@app.route("/")
+def root():
+    return jsonify({"message":"Pramān backend is running"}), 200
+
+# ---------- Signup ----------
 @app.route("/signup", methods=["POST"])
 def signup():
-    try:
-        data = request.json
-        username = data.get("username")
-        password = data.get("password")
-        role_type = data.get("role_type")
-        details = {
-            "name": data.get("name"),
-            "email": data.get("email"),
-            "contact": data.get("contact"),
-            "address": data.get("address"),
-            "designation": data.get("designation")
-        }
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    role_type = data.get("role_type")  # 'institute' or 'organisation'
+    details = {k:v for k,v in data.items() if k not in ["username","password","role_type"]}
 
-        if not username or not password or not role_type:
-            return jsonify({"error": "Missing required fields"}), 400
-        if get_user(username):
-            return jsonify({"error": "Username already exists"}), 400
-        add_user(username, password, role_type, details)
-        return jsonify({"message": f"{role_type.capitalize()} account created successfully!"}), 201
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    if not all([username, password, role_type]):
+        return jsonify({"error":"Username, password, and role_type required"}), 400
+    if get_user(username):
+        return jsonify({"error":"Username already exists"}), 400
+    add_user(username, password, role_type, details)
+    return jsonify({"message":"User created successfully"}), 201
 
+# ---------- Login ----------
 @app.route("/login", methods=["POST"])
 def login():
     data = request.json
@@ -186,164 +200,137 @@ def login():
     password = data.get("password")
     user_type = data.get("user_type")
 
+    if not all([username, password, user_type]):
+        return jsonify({"error":"Username, password, and user_type required"}),400
     user = get_user(username)
     if not user or user["password"] != hash_password(password):
-        return jsonify({"error": "Invalid credentials"}), 401
+        return jsonify({"error":"Invalid credentials"}),401
+    if user["role"] not in ["admin","institute","organisation"]:
+        return jsonify({"error":"Invalid role"}),403
+    access_token = jwt.encode({"username": username, "exp": datetime.datetime.utcnow()+datetime.timedelta(hours=8)}, app.config["SECRET_KEY"], algorithm="HS256")
+    return jsonify({"access_token": access_token, "role": user["role"]}),200
 
-    role_map = {
-        "Admin": "admin",
-        "Institute / Issuer": "institute",
-        "Organisation / Verifier": "organisation"
-    }
-    expected_role = role_map.get(user_type)
-    if expected_role != user["role"]:
-        return jsonify({"error": f"This account is not allowed for {user_type} login"}), 403
-
-    token = jwt.encode({
-        "username": username,
-        "role": user["role"],
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=12)
-    }, app.config["SECRET_KEY"], algorithm="HS256")
-    return jsonify({"access_token": token, "role": user["role"]})
-
-# -------------------- Certificate Issuance --------------------
+# ---------- Issue Certificate ----------
 @app.route("/issue", methods=["POST"])
 @token_required
 def issue_cert(current_user):
     if current_user["role"] != "institute":
         return jsonify({"error": "Only institutes can issue certificates"}), 403
 
-    # Metadata
     student_name = request.form.get("student_name")
     roll_no = request.form.get("roll_no")
+    dob = request.form.get("dob")
     course = request.form.get("course")
     college = request.form.get("college")
     date_of_issue = request.form.get("date_of_issue") or datetime.datetime.utcnow().date().isoformat()
+    if not all([student_name, roll_no, dob, course, college, date_of_issue]):
+        return jsonify({"error":"All crucial fields required"}), 400
 
-    if not student_name or not roll_no or not course or not college:
-        return jsonify({"error": "Missing required metadata"}), 400
-
-    # File upload
     if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        return jsonify({"error":"Certificate file missing"}),400
     file = request.files["file"]
-    file_bytes = file.read()
-    file_hash = hashlib.sha256(file_bytes).hexdigest()
+
     cert_id = str(uuid.uuid4())
-
-    # Save file in structured folder
-    base_dir = "issued_certificates"
-    student_folder = os.path.join(base_dir, student_name.replace(" ", "_"))
-    os.makedirs(student_folder, exist_ok=True)
+    os.makedirs("issued_certificates", exist_ok=True)
     ext = os.path.splitext(file.filename)[1] or ".pdf"
-    file_path = os.path.join(student_folder, f"{cert_id}{ext}")
-    with open(file_path, "wb") as f:
-        f.write(file_bytes)
+    file_path = os.path.join("issued_certificates", f"{cert_id}{ext}")
+    file.save(file_path)
 
-    # Blockchain transaction
+    ocr_text = extract_text_from_file(file)
+    ocr_fields = extract_fields_from_ocr(ocr_text)
+    metadata_hash = compute_metadata_hash(ocr_fields)
+
     try:
-        tx_hash = contract.functions.issueCertificate(cert_id, file_hash, student_name, roll_no, course, college).transact({'from': CHAIN_ADDRESS})
+        tx_hash = contract.functions.issueCertificate(
+            cert_id, metadata_hash,
+            ocr_fields["student_name"], ocr_fields["roll_no"],
+            ocr_fields["course"], ocr_fields["college"]
+        ).transact({'from': CHAIN_ADDRESS})
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         tx_hash_hex = receipt.transactionHash.hex()
     except Exception as e:
-        return jsonify({"error": f"Blockchain transaction failed: {str(e)}"}), 500
+        return jsonify({"error": f"Blockchain tx failed: {str(e)}"}),500
 
-    # Generate QR
-    qr_b64 = generate_qr(cert_id, tx_hash_hex)
-
-    # Save to DB
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO certificates (cert_id, issuer, student_name, roll_no, course, college, date_of_issue,
-                                  file_hash, status, qr_code, tx_hash, issued_at, file_path)
+        INSERT INTO certificates (cert_id, issuer, student_name, roll_no, dob, course, college, date_of_issue,
+                                 metadata_hash, status, tx_hash, issued_at, file_path)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (cert_id, current_user["role"], student_name, roll_no, course, college, date_of_issue,
-          file_hash, "valid", qr_b64, tx_hash_hex, datetime.datetime.utcnow().isoformat(), file_path))
+    """, (cert_id, current_user["role"], student_name, roll_no, dob, course, college, date_of_issue,
+          metadata_hash, "valid", tx_hash_hex, datetime.datetime.utcnow().isoformat(), file_path))
     conn.commit()
     conn.close()
 
     return jsonify({
         "cert_id": cert_id,
+        "status":"issued",
+        "tx_hash": tx_hash_hex,
         "student_name": student_name,
         "roll_no": roll_no,
+        "dob": dob,
         "course": course,
         "college": college,
         "date_of_issue": date_of_issue,
-        "qr_code": qr_b64,
-        "tx_hash": tx_hash_hex,
-        "status": "issued"
+        "debug":{"ocr_text": ocr_text}
     })
 
-# -------------------- Certificate Verification --------------------
+# ---------- Verify Certificate ----------
 @app.route("/verify", methods=["POST"])
 def verify_cert():
     try:
-        data = request.form
-        cert_id = data.get("cert_id")
-        student_name = data.get("student_name")
-        roll_no = data.get("roll_no")
-        course = data.get("course")
-        college = data.get("college")
         file = request.files.get("file")
+        student_name = request.form.get("student_name","").strip().lower()
+        roll_no = request.form.get("roll_no","").strip().lower()
+        date_of_issue = request.form.get("date_of_issue","").strip()
 
+        if not student_name or not file:
+            return jsonify({"error":"Student name and certificate file mandatory"}),400
+        if not roll_no and not date_of_issue:
+            return jsonify({"error":"Provide either roll_no or date_of_issue"}),400
+
+        ocr_text = extract_text_from_file(file)
+        ocr_fields = extract_fields_from_ocr(ocr_text)
+        metadata_hash = compute_metadata_hash(ocr_fields)
+
+        # DB Lookup
         conn = get_db()
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM certificates WHERE cert_id=?", (cert_id,))
+        cursor.execute("SELECT * FROM certificates WHERE metadata_hash=?",(metadata_hash,))
         cert = cursor.fetchone()
-        if not cert:
-            return jsonify({"status": "not_found"}), 404
-
-        status = "valid"
-        tamper_score = 0
-
-        # File hash verification
-        if file:
-            file_hash = hashlib.sha256(file.read()).hexdigest()
-            if file_hash != cert["file_hash"]:
-                status = "tampered"
-                tamper_score = 1.0
-                cursor.execute(
-                    "INSERT INTO fraud_logs (cert_id, tamper_score, logged_at) VALUES (?,?,?)",
-                    (cert_id, tamper_score, datetime.datetime.utcnow().isoformat())
-                )
-                conn.commit()
-
-        # Metadata verification
-        if (student_name and student_name != cert["student_name"]) or \
-           (roll_no and roll_no != cert["roll_no"]) or \
-           (course and course != cert["course"]) or \
-           (college and college != cert["college"]):
-            status = "tampered"
-            tamper_score = 1.0
-            cursor.execute(
-                "INSERT INTO fraud_logs (cert_id, tamper_score, logged_at) VALUES (?,?,?)",
-                (cert_id, tamper_score, datetime.datetime.utcnow().isoformat())
-            )
-            conn.commit()
-
         conn.close()
 
-        return jsonify({
-            "status": status,
-            "cert_id": cert["cert_id"],
-            "student_name": cert["student_name"],
-            "roll_no": cert["roll_no"],
-            "course": cert["course"],
-            "college": cert["college"],
-            "date_of_issue": cert["date_of_issue"],
-            "tx_hash": cert["tx_hash"],
-            "file_verified": file is None or file_hash == cert["file_hash"]
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        if not cert:
+            return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
 
-# -------------------- Fraud Logs --------------------
+        # Blockchain verification
+        exists, cert_id = contract.functions.verifyMetadataHash(metadata_hash).call()
+        if not exists:
+            return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
+
+        # Check crucial fields
+        name_match = cert["student_name"].lower() == student_name
+        roll_match = roll_no and cert["roll_no"].lower() == roll_no
+        date_match = date_of_issue and cert["date_of_issue"] == date_of_issue
+
+        if name_match and (roll_match or date_match):
+            return jsonify({
+                "status":"valid",
+                **{k: cert[k] for k in ["cert_id","student_name","roll_no","dob","course","college","date_of_issue","tx_hash"]},
+                "debug":{"ocr_text":ocr_text}
+            })
+        else:
+            return jsonify({"status":"tampered or invalid","debug":{"ocr_text":ocr_text}}),404
+
+    except Exception as e:
+        return jsonify({"error": str(e)}),500
+
+# ---------- Fraud Logs ----------
 @app.route("/fraud_logs", methods=["GET"])
 @token_required
 def get_fraud_logs(current_user):
     if current_user["role"] != "admin":
-        return jsonify({"error": "Unauthorized"}), 403
+        return jsonify({"error":"Unauthorized"}),403
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM fraud_logs")
@@ -351,12 +338,7 @@ def get_fraud_logs(current_user):
     conn.close()
     return jsonify(logs)
 
-# -------------------- Health Check --------------------
-@app.route("/ping", methods=["GET"])
-def ping():
-    return jsonify({"status": "pong", "message": "Pramān backend running"}), 200
-
-# -------------------- Run --------------------
+# -------------------- Main --------------------
 if __name__ == "__main__":
     os.makedirs("issued_certificates", exist_ok=True)
     app.run(host="0.0.0.0", port=5000, debug=True)
