@@ -22,7 +22,7 @@ WEB3_PROVIDER = "HTTP://127.0.0.1:8545"
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
 CHAIN_ADDRESS = w3.eth.accounts[0] if w3.is_connected() else None
 
-CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+CONTRACT_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 with open("CertificateRegistryABI.json") as f:
     CONTRACT_ABI = json.load(f)
 contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
@@ -38,6 +38,8 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
+    # Updated: Added a 'reason' column to the fraud_logs table
+    cursor.execute("DROP TABLE IF EXISTS fraud_logs")
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
@@ -68,6 +70,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         cert_id TEXT,
         tamper_score REAL,
+        reason TEXT,
         logged_at TEXT
     )
     """)
@@ -84,9 +87,9 @@ POPPLER_PATH = r"C:\poppler-25.07.0\Library\bin"
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
-def compute_metadata_hash(metadata: dict) -> str:
-    data_string = "|".join([str(metadata.get(k, "")) for k in ["student_name","roll_no","dob","course","college","date_of_issue"]])
-    return hashlib.sha256(data_string.encode()).hexdigest()
+def compute_metadata_hash(ocr_text: str) -> str:
+    """Computes a SHA256 hash from the entire OCR text content."""
+    return hashlib.sha256(ocr_text.encode()).hexdigest()
 
 def token_required(f):
     @wraps(f)
@@ -152,23 +155,24 @@ def extract_text_from_file(file):
         ocr_text += pytesseract.image_to_string(img) + "\n"
     return ocr_text
 
-def extract_fields_from_ocr(ocr_text):
-    fields = {"student_name":"","roll_no":"","dob":"","course":"","college":"","date_of_issue":""}
-    for line in ocr_text.splitlines():
-        line_lower = line.lower()
-        if "name" in line_lower and not fields["student_name"]:
-            fields["student_name"] = line.split(":")[-1].strip()
-        elif "roll" in line_lower and not fields["roll_no"]:
-            fields["roll_no"] = line.split(":")[-1].strip()
-        elif "dob" in line_lower and not fields["dob"]:
-            fields["dob"] = line.split(":")[-1].strip()
-        elif "course" in line_lower and not fields["course"]:
-            fields["course"] = line.split(":")[-1].strip()
-        elif "college" in line_lower and not fields["college"]:
-            fields["college"] = line.split(":")[-1].strip()
-        elif "issue" in line_lower and not fields["date_of_issue"]:
-            fields["date_of_issue"] = line.split(":")[-1].strip()
-    return fields
+# The extract_fields_from_ocr function has been removed as requested.
+
+# NEW: Helper function to log a fraud event with enhanced error handling
+def log_fraud(cert_id, reason):
+    """Logs a fraud event to the database with debug logging."""
+    logging.info(f"Attempting to log fraud for cert_id: {cert_id}")
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO fraud_logs (cert_id, tamper_score, reason, logged_at)
+            VALUES (?, ?, ?, ?)
+        """, (cert_id, 1.0, reason, datetime.datetime.utcnow().isoformat()))
+        conn.commit()
+        conn.close()
+        logging.info(f"Fraud logged successfully. Reason: {reason}")
+    except Exception as e:
+        logging.error(f"Failed to log fraud event: {str(e)}")
 
 # -------------------- Routes --------------------
 
@@ -182,7 +186,7 @@ def signup():
     data = request.json
     username = data.get("username")
     password = data.get("password")
-    role_type = data.get("role_type")  # 'institute' or 'organisation'
+    role_type = data.get("role_type") # 'institute' or 'organisation'
     details = {k:v for k,v in data.items() if k not in ["username","password","role_type"]}
 
     if not all([username, password, role_type]):
@@ -230,21 +234,31 @@ def issue_cert(current_user):
         return jsonify({"error":"Certificate file missing"}),400
     file = request.files["file"]
 
+    ocr_text = extract_text_from_file(file)
+    metadata_hash = compute_metadata_hash(ocr_text)
+
+    # NEW: Check for duplicate metadata before issuing
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT cert_id FROM certificates WHERE metadata_hash=?", (metadata_hash,))
+    existing_cert = cursor.fetchone()
+    conn.close()
+    if existing_cert:
+        log_fraud(existing_cert['cert_id'], "Duplicate Issuance Attempt: Document hash already exists.")
+        return jsonify({"error": "A certificate with this exact content already exists."}), 409
+
     cert_id = str(uuid.uuid4())
     os.makedirs("issued_certificates", exist_ok=True)
     ext = os.path.splitext(file.filename)[1] or ".pdf"
     file_path = os.path.join("issued_certificates", f"{cert_id}{ext}")
     file.save(file_path)
 
-    ocr_text = extract_text_from_file(file)
-    ocr_fields = extract_fields_from_ocr(ocr_text)
-    metadata_hash = compute_metadata_hash(ocr_fields)
 
     try:
         tx_hash = contract.functions.issueCertificate(
             cert_id, metadata_hash,
-            ocr_fields["student_name"], ocr_fields["roll_no"],
-            ocr_fields["course"], ocr_fields["college"]
+            student_name, roll_no,
+            course, college
         ).transact({'from': CHAIN_ADDRESS})
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         tx_hash_hex = receipt.transactionHash.hex()
@@ -290,8 +304,7 @@ def verify_cert():
             return jsonify({"error":"Provide either roll_no or date_of_issue"}),400
 
         ocr_text = extract_text_from_file(file)
-        ocr_fields = extract_fields_from_ocr(ocr_text)
-        metadata_hash = compute_metadata_hash(ocr_fields)
+        metadata_hash = compute_metadata_hash(ocr_text)
 
         # DB Lookup
         conn = get_db()
@@ -301,11 +314,15 @@ def verify_cert():
         conn.close()
 
         if not cert:
+            # Case 1: Document is wrong, hash is not in the database
+            log_fraud(None, "Document Hash Not Found: The uploaded document's hash does not exist.")
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
 
         # Blockchain verification
         exists, cert_id = contract.functions.verifyMetadataHash(metadata_hash).call()
         if not exists:
+            # Case 2: Hash found in DB, but not on the blockchain (highly suspicious)
+            log_fraud(cert["cert_id"], "Blockchain Mismatch: Document hash found in DB but not on the blockchain.")
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
 
         # Check crucial fields
@@ -320,6 +337,8 @@ def verify_cert():
                 "debug":{"ocr_text":ocr_text}
             })
         else:
+            # Case 3: Certificate matches on blockchain and DB, but provided fields don't match
+            log_fraud(cert["cert_id"], "Data Mismatch: Provided user details do not match the certificate.")
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text":ocr_text}}),404
 
     except Exception as e:
