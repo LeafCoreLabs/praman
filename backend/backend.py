@@ -22,7 +22,7 @@ WEB3_PROVIDER = "HTTP://127.0.0.1:8545"
 w3 = Web3(Web3.HTTPProvider(WEB3_PROVIDER))
 CHAIN_ADDRESS = w3.eth.accounts[0] if w3.is_connected() else None
 
-CONTRACT_ADDRESS = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
 with open("CertificateRegistryABI.json") as f:
     CONTRACT_ABI = json.load(f)
 contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
@@ -234,6 +234,7 @@ def issue_cert(current_user):
         return jsonify({"error":"Certificate file missing"}),400
     file = request.files["file"]
 
+    # The file stream is consumed here for OCR and hashing.
     ocr_text = extract_text_from_file(file)
     metadata_hash = compute_metadata_hash(ocr_text)
 
@@ -251,8 +252,11 @@ def issue_cert(current_user):
     os.makedirs("issued_certificates", exist_ok=True)
     ext = os.path.splitext(file.filename)[1] or ".pdf"
     file_path = os.path.join("issued_certificates", f"{cert_id}{ext}")
+    
+    # FIX: Reset the file stream pointer to the beginning (0) so file.save() can read the content from the start.
+    file.seek(0)
+    
     file.save(file_path)
-
 
     try:
         tx_hash = contract.functions.issueCertificate(
@@ -303,6 +307,7 @@ def verify_cert():
         if not roll_no and not date_of_issue:
             return jsonify({"error":"Provide either roll_no or date_of_issue"}),400
 
+        # The file stream is consumed here for OCR and hashing.
         ocr_text = extract_text_from_file(file)
         metadata_hash = compute_metadata_hash(ocr_text)
 
