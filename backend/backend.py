@@ -5,6 +5,7 @@ import jwt
 import datetime
 from functools import wraps
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from web3 import Web3
 import sqlite3
 import json
@@ -14,6 +15,7 @@ import pytesseract
 from pdf2image import convert_from_bytes
 
 app = Flask(__name__)
+CORS(app)  # <-- allow cross-origin requests from your React frontend
 app.config["SECRET_KEY"] = "supersecretkey"
 logging.basicConfig(level=logging.INFO)
 
@@ -38,7 +40,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cursor = conn.cursor()
-    # Updated: Added a 'reason' column to the fraud_logs table
+    # DROPPING fraud_logs to ensure the new 'username' column is added
     cursor.execute("DROP TABLE IF EXISTS fraud_logs")
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -71,6 +73,7 @@ def init_db():
         cert_id TEXT,
         tamper_score REAL,
         reason TEXT,
+        username TEXT,  -- <--- ADDED: Column to track the user who triggered the log
         logged_at TEXT
     )
     """)
@@ -91,15 +94,38 @@ def compute_metadata_hash(ocr_text: str) -> str:
     """Computes a SHA256 hash from the entire OCR text content."""
     return hashlib.sha256(ocr_text.encode()).hexdigest()
 
+def get_username_from_request_header():
+    """Extracts username from JWT token in the Authorization header, if present."""
+    token = None
+    if "Authorization" in request.headers:
+        try:
+            # Expecting "Bearer <token>"
+            token = request.headers["Authorization"].split(" ")[1]
+        except IndexError:
+            # If header doesn't contain a space, treat whole header as token
+            token = request.headers["Authorization"]
+    
+    if token:
+        try:
+            # Decode token to get username
+            data = jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
+            return data.get("username")
+        except:
+            # Token exists but is invalid/expired, treat as anonymous for logging purposes
+            return None
+    return None
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = None
         if "Authorization" in request.headers:
             try:
+                # Expecting "Bearer <token>"
                 token = request.headers["Authorization"].split(" ")[1]
             except IndexError:
-                return jsonify({"error": "Token malformed"}), 401
+                # If header doesn't contain a space, treat whole header as token
+                token = request.headers["Authorization"]
         if not token:
             return jsonify({"error": "Token missing"}), 401
         try:
@@ -155,22 +181,22 @@ def extract_text_from_file(file):
         ocr_text += pytesseract.image_to_string(img) + "\n"
     return ocr_text
 
-# The extract_fields_from_ocr function has been removed as requested.
-
-# NEW: Helper function to log a fraud event with enhanced error handling
-def log_fraud(cert_id, reason):
-    """Logs a fraud event to the database with debug logging."""
-    logging.info(f"Attempting to log fraud for cert_id: {cert_id}")
+# UPDATED: Helper function to log a fraud event with user tracking
+def log_fraud(cert_id, reason, username=None): 
+    """Logs a fraud event to the database with debug logging, including the user who initiated it."""
+    # Use 'Anonymous' if username is not provided (e.g., public verify attempt by unauthenticated user)
+    source_username = username if username else 'Anonymous' 
+    logging.info(f"Attempting to log fraud for cert_id: {cert_id}, user: {source_username}")
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO fraud_logs (cert_id, tamper_score, reason, logged_at)
-            VALUES (?, ?, ?, ?)
-        """, (cert_id, 1.0, reason, datetime.datetime.utcnow().isoformat()))
+            INSERT INTO fraud_logs (cert_id, tamper_score, reason, username, logged_at) 
+            VALUES (?, ?, ?, ?, ?)
+        """, (cert_id, 1.0, reason, source_username, datetime.datetime.utcnow().isoformat()))
         conn.commit()
         conn.close()
-        logging.info(f"Fraud logged successfully. Reason: {reason}")
+        logging.info(f"Fraud logged successfully. Reason: {reason}, User: {source_username}")
     except Exception as e:
         logging.error(f"Failed to log fraud event: {str(e)}")
 
@@ -199,20 +225,30 @@ def signup():
 # ---------- Login ----------
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.json
+    data = request.json or {}
     username = data.get("username")
     password = data.get("password")
-    user_type = data.get("user_type")
 
-    if not all([username, password, user_type]):
-        return jsonify({"error":"Username, password, and user_type required"}),400
+    if not all([username, password]):
+        return jsonify({"error":"Username and password required"}), 400
+
     user = get_user(username)
     if not user or user["password"] != hash_password(password):
-        return jsonify({"error":"Invalid credentials"}),401
+        return jsonify({"error":"Invalid credentials"}), 401
+
     if user["role"] not in ["admin","institute","organisation"]:
-        return jsonify({"error":"Invalid role"}),403
-    access_token = jwt.encode({"username": username, "exp": datetime.datetime.utcnow()+datetime.timedelta(hours=8)}, app.config["SECRET_KEY"], algorithm="HS256")
-    return jsonify({"access_token": access_token, "role": user["role"]}),200
+        return jsonify({"error":"Invalid role"}), 403
+
+    access_token = jwt.encode(
+        {"username": username, "role": user["role"], "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=8)},
+        app.config["SECRET_KEY"],
+        algorithm="HS256"
+    )
+    # pyjwt returns a string token in recent versions; ensure it's JSON serializable
+    if isinstance(access_token, bytes):
+        access_token = access_token.decode("utf-8")
+
+    return jsonify({"access_token": access_token, "role": user["role"]}), 200
 
 # ---------- Issue Certificate ----------
 @app.route("/issue", methods=["POST"])
@@ -245,7 +281,8 @@ def issue_cert(current_user):
     existing_cert = cursor.fetchone()
     conn.close()
     if existing_cert:
-        log_fraud(existing_cert['cert_id'], "Duplicate Issuance Attempt: Document hash already exists.")
+        # UPDATED: Pass the username of the logged-in user
+        log_fraud(existing_cert['cert_id'], "Duplicate Issuance Attempt: Document hash already exists.", username=current_user["username"])
         return jsonify({"error": "A certificate with this exact content already exists."}), 409
 
     cert_id = str(uuid.uuid4())
@@ -296,6 +333,9 @@ def issue_cert(current_user):
 # ---------- Verify Certificate ----------
 @app.route("/verify", methods=["POST"])
 def verify_cert():
+    # NEW: Attempt to get username from header (even if route is not protected)
+    username_from_token = get_username_from_request_header()
+
     try:
         file = request.files.get("file")
         student_name = request.form.get("student_name","").strip().lower()
@@ -320,14 +360,16 @@ def verify_cert():
 
         if not cert:
             # Case 1: Document is wrong, hash is not in the database
-            log_fraud(None, "Document Hash Not Found: The uploaded document's hash does not exist.")
+            # UPDATED: Pass the username (Anonymous if not logged in)
+            log_fraud(None, "Document Hash Not Found: The uploaded document's hash does not exist.", username=username_from_token)
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
 
         # Blockchain verification
         exists, cert_id = contract.functions.verifyMetadataHash(metadata_hash).call()
         if not exists:
             # Case 2: Hash found in DB, but not on the blockchain (highly suspicious)
-            log_fraud(cert["cert_id"], "Blockchain Mismatch: Document hash found in DB but not on the blockchain.")
+            # UPDATED: Pass the username (Anonymous if not logged in)
+            log_fraud(cert["cert_id"], "Blockchain Mismatch: Document hash found in DB but not on the blockchain.", username=username_from_token)
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text": ocr_text}}),404
 
         # Check crucial fields
@@ -343,7 +385,8 @@ def verify_cert():
             })
         else:
             # Case 3: Certificate matches on blockchain and DB, but provided fields don't match
-            log_fraud(cert["cert_id"], "Data Mismatch: Provided user details do not match the certificate.")
+            # UPDATED: Pass the username (Anonymous if not logged in)
+            log_fraud(cert["cert_id"], "Data Mismatch: Provided user details do not match the certificate.", username=username_from_token)
             return jsonify({"status":"tampered or invalid","debug":{"ocr_text":ocr_text}}),404
 
     except Exception as e:
@@ -357,6 +400,7 @@ def get_fraud_logs(current_user):
         return jsonify({"error":"Unauthorized"}),403
     conn = get_db()
     cursor = conn.cursor()
+    # SELECT * will now include the 'username' column, which the frontend expects
     cursor.execute("SELECT * FROM fraud_logs")
     logs = [dict(r) for r in cursor.fetchall()]
     conn.close()
