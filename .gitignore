@@ -1,2 +1,3 @@
 backend/issued_certificates/
 backend/praman.db
+node_modules/
