@@ -331,20 +331,21 @@ const App = () => {
                 }
             });
 
-            // --- CRITICAL FIX: Ensure state update happens immediately after successful request ---
-            console.log("Backend Issue Response Data:", response.data); // DEBUGGING LINE
+            // --- CRITICAL FIX: Extract and display Tx Hash/Cert ID ---
+            const data = response.data;
+            console.log("Backend Issue Response Data:", data); // DEBUGGING LINE
             
-            const certId = response.data.cert_id || 'N/A (Missing)';
-            const txHash = response.data.tx_hash || 'N/A (Missing)';
+            const certId = data.cert_id || 'N/A';
+            const txHash = data.tx_hash || 'N/A';
             
             // Generate display string safely
-            const certIdDisplay = (typeof certId === 'string' && certId.length > 8) ? `${certId.substring(0, 8)}...` : certId;
-            const txHashDisplay = (typeof txHash === 'string' && txHash.length > 10) ? `${txHash.substring(0, 10)}...` : txHash;
+            // *** FIX IMPLEMENTED HERE: Using \n for line break in the message string ***
+            const messageText = `Certificate Issued Successfully!\nID: ${certId}\nTx Hash: ${txHash}`;
 
-            // Set success message first
+            // Set success message including the crucial transaction details
             setMessage({ 
                 type: 'success', 
-                text: `Certificate Issued Successfully! ID: ${certIdDisplay} (Tx: ${txHashDisplay})` 
+                text: messageText
             });
             
             // Then clear form elements
@@ -394,7 +395,7 @@ const App = () => {
             if (date_of_issue) formData.append('date_of_issue', date_of_issue);
             formData.append('file', uploadedFile);
 
-            // START OF FRAUD TRACKING FIX
+            // START OF FRAUD TRACKING FIX (Sending token if logged in)
             const headers = { 'Content-Type': 'multipart/form-data' };
             if (token) {
                 // Pass the token if the user is logged in, allowing the backend to log their ID.
@@ -412,7 +413,7 @@ const App = () => {
             } 
             // In case the backend returns 200 but status is not 'valid' (shouldn't happen with current backend code)
             else {
-                 setMessage({ type: 'error', text: 'Verification failed with an unexpected status.' });
+                setMessage({ type: 'error', text: 'Verification failed with an unexpected status.' });
             }
             console.log("Verify Response:", response.data);
 
@@ -508,16 +509,17 @@ const App = () => {
     const renderMessage = () => {
         if (!message.text) return null;
 
-        const baseClasses = "p-3 mt-4 rounded-lg shadow-lg text-sm flex items-center mb-4";
+        const baseClasses = "p-3 mt-4 rounded-lg shadow-lg text-sm flex items-start mb-4 whitespace-pre-wrap"; // ADDED whitespace-pre-wrap
         const successClasses = "bg-green-600 text-white";
         const errorClasses = "bg-red-600 text-white";
 
         const classes = message.type === 'success' ? successClasses : errorClasses;
         const Icon = message.type === 'success' ? CheckCircle : XCircle;
 
+        // Use pre-wrap to respect the \n line break
         return (
             <div className={`${baseClasses} ${classes} animate-in fade-in duration-500`}>
-                <Icon className="w-5 h-5 mr-3" />
+                <Icon className="w-5 h-5 mr-3 mt-0.5" />
                 {message.text}
             </div>
         );
@@ -848,6 +850,9 @@ const App = () => {
                     )}
                 </div>
             </div>
+            
+            {/* FIX: RENDER MESSAGE HERE */}
+            {renderMessage()}
 
             <div className="flex justify-center mb-8">
                 <div className="flex space-x-2 bg-gray-200 p-1 rounded-full shadow-inner">
@@ -940,7 +945,6 @@ const App = () => {
                                 </button>
                             )}
                         </div>
-                        {/* Only render SignupForm if it's not the Admin portal AND we are on the signup step */}
                         {isLogin ? renderLoginForm() : !isAdminPortal ? renderSignupForm() : (
                             <div className="text-center p-8 bg-gray-100 rounded-lg text-gray-700 border border-gray-300">
                                 <Lock className="w-8 h-8 mx-auto text-red-500 mb-2" />
